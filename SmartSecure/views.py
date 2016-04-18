@@ -1,0 +1,545 @@
+from django.shortcuts import render
+from django.http import HttpResponse, HttpResponseRedirect
+from django.utils.safestring import mark_safe
+from django import forms
+from bson.objectid import ObjectId
+import pymongo
+from datetime import datetime, date
+from common import readable_time, readable_size, convert_datetime
+from hashlib import md5
+
+MONGODB_URI = "mongodb://smartsecure:SJSU2016@ds015909.mlab.com:15909/smartsecure"
+# MONGODB_URI = "mongodb://taniachanda86:dharmanagar1@ds041164.mongolab.com:41164/go_273"
+
+class SetCookieForm(forms.Form):
+    user_name = forms.CharField(label='User Name', max_length=30)
+    password = forms.CharField(label='Password', max_length=30)
+
+class DatePicker(forms.Form):
+    date = forms.DateField(initial=date.today)
+
+
+def registered_user(user_name, md5_password):
+    try:
+        msg = "User_name and password not found"
+        client = pymongo.MongoClient(MONGODB_URI)
+        db = client.smartsecure
+        already_registered = db.SignUpData.find_one({"userId": user_name,
+                                                     "password": md5_password})
+        if already_registered:
+            return (True, msg)
+        else:
+            user_exists = db.SignUpData.find_one({"userId": user_name})
+            if user_exists:
+                msg = "User name and password does not match"
+                return (False, msg)
+            else:
+                msg = "Unregistered User"
+                return (False, msg)
+        return (False, msg)
+    except Exception, m:
+        print "Error: %s" % m
+    return (False, msg)
+
+
+
+def login(request, linkpath):
+    if request.method == 'POST':
+        if request.session.test_cookie_worked():
+            request.session.delete_test_cookie()
+            form = SetCookieForm(request.POST, label_suffix=': ')
+            if form.is_valid():
+                user_name = form.cleaned_data['user_name']
+                if not user_name:
+                    return HttpResponse("Please enter a valid value for User name.")
+
+                password = md5(form.cleaned_data['password']).hexdigest()
+
+                if not password:
+                    return HttpResponse("Please enter a valid value for Password")
+
+                print user_name, password
+
+                valid_user, msg = registered_user(user_name, password)
+                if not valid_user:
+                    context = {
+                        'error_message': msg
+                    }
+                    return render(request,
+                                  "SmartSecure/help.html",
+                                  context)
+
+                request.COOKIES['smart_user_name'] = user_name
+                request.session['smart_user_name'] = user_name
+                request.session.modified = True
+                max_age = 7 * 24 * 60 * 60  # 7 days
+
+                if linkpath.startswith('/login'):
+                    linkpath = linkpath[6:]
+                else:
+                    linkpath = '/' + linkpath
+                response = HttpResponseRedirect(linkpath)
+                response.set_cookie('smart_user_name', user_name, max_age=max_age)
+                return response
+            else:
+                # form.cleaned_data['user_name']
+                # form.cleaned_data['password']
+                message = "Please enter valid value username and password"
+                message = '<span style="color:red;">' + message + '</span><br><br>'
+                message = mark_safe(message)
+
+                form = SetCookieForm(label_suffix=': ')
+                linkpath = "/dashboard"
+                context = {
+                    'login_page': True,
+                    'form': form,
+                    'redirect': linkpath,
+                    'error_message': message
+                }
+                request.session.set_test_cookie()
+                return render(request,
+                              "SmartSecure/login2.html",
+                              context)
+
+        else:
+            return HttpResponse("Please check if cookies are enabled and reload the page.")
+    else:
+        request.session.set_test_cookie()
+        form = SetCookieForm(label_suffix=': ')
+        if linkpath == '':
+            linkpath = '/dashboard'
+        message = request.session.get('smart_user_name_error', '')
+        if message != '':
+            message = '<span style="color:red;">' + message + '</span><br><br>'
+            message = mark_safe(message)
+        context = {
+            'login_page': True,
+            'form': form,
+            'redirect': linkpath,
+            'error_message': message
+        }
+        return render(request,
+                      "SmartSecure/login2.html",
+                      context)
+
+
+class RegistrationForm(forms.Form):
+    full_name = forms.CharField(label='Full Name', max_length=30)
+    phone_number = forms.CharField(label='Phone Number', max_length=30)
+    user_name = forms.CharField(label='Email', max_length=30)
+    password = forms.CharField(label='Password', max_length=30)
+
+
+def validate_user(user_name):
+    try:
+        msg = ""
+        client = pymongo.MongoClient(MONGODB_URI)
+        db = client.smartsecure
+        # locations = db.smartsecure.find_one({"userId": user_name})
+        locations = db.smartsecure.find_one({"userId": user_name})
+        if locations:
+            already_registered = db.SignUpData.find_one({"userId": user_name})
+            if already_registered:
+                msg = "User already registered."
+                return (False, msg)
+        else:
+            msg = "User has never used the mobile app"
+            return (False, msg)
+        return (True, msg)
+    except Exception, m:
+        print "Error: %s" % m
+    return (True, msg)
+    
+
+def register_user(full_name, phone_number, user_name, password):
+    try:
+        msg = ""
+        client = pymongo.MongoClient(MONGODB_URI)
+        db = client.smartsecure
+        db.SignUpData.insert({"userId": user_name, 'full_name': full_name,
+                              "phone_number": phone_number, "password": password})
+        return True
+    except Exception, m:
+        print "Error: %s" % m
+    return False
+
+
+def register(request, linkpath="/"):
+    if request.method == 'POST':
+        if request.session.test_cookie_worked():
+            request.session.delete_test_cookie()
+            form = RegistrationForm(request.POST, label_suffix=': ')
+            if form.is_valid():
+                user_name = form.cleaned_data['user_name']
+                if not user_name:
+                    return HttpResponse("Please enter a valid value for User name.")
+
+                # password collection
+                password = md5(form.cleaned_data['password']).hexdigest()
+
+                if not password:
+                    return HttpResponse("Please enter a valid value for Password")
+
+                full_name = form.cleaned_data['full_name']
+                phone_number = form.cleaned_data['phone_number']
+                valid_user, msg = validate_user(user_name)
+                print "----------------------"
+                print msg
+                if valid_user:
+                    print full_name, phone_number, user_name, password
+                    
+                    request.COOKIES['smart_user_name'] = user_name
+                    request.session['smart_user_name'] = user_name
+                    request.session.modified = True
+                    max_age = 7 * 24 * 60 * 60  # 7 days
+
+                    if linkpath.startswith('/register'):
+                        linkpath = linkpath[8:]
+                    elif linkpath == "/":
+                        linkpath = "/dashboard"
+                    else:
+                        linkpath = '/' + linkpath
+                    response = HttpResponseRedirect(linkpath)
+                    response.set_cookie('smart_user_name', user_name, max_age=max_age)
+                    # register_data in DB
+                    ret = register_user(full_name, phone_number, user_name, password)
+                    print ret
+                    return response
+                else:
+                    # User has never used the mobile app
+                    # redirect the user to use the mobile app first
+
+                    context = {
+                        'error_message': msg
+                    }
+                    return render(request,
+                                  "SmartSecure/help.html",
+                                  context)
+
+            else:
+                # form.cleaned_data['user_name']
+                # form.cleaned_data['password']
+                message = "Please enter valid value username and password"
+                message = '<span style="color:red;">' + message + '</span><br><br>'
+                message = mark_safe(message)
+
+                form = SetCookieForm(label_suffix=': ')
+                linkpath = "/dashboard"
+                context = {
+                    'login_page': True,
+                    'form': form,
+                    'redirect': linkpath,
+                    'error_message': message
+                }
+                request.session.set_test_cookie()
+                return render(request,
+                              "SmartSecure/register.html",
+                              context)
+
+        else:
+            return HttpResponse("Please check if cookies are enabled and reload the page.")
+    else:
+        request.session.set_test_cookie()
+        form = SetCookieForm(label_suffix=': ')
+        if linkpath == '':
+            linkpath = '/dashboard'
+        message = request.session.get('smart_user_name_error', '')
+        if message != '':
+            message = '<span style="color:red;">' + message + '</span><br><br>'
+            message = mark_safe(message)
+        context = {
+            'login_page': True,
+            'form': form,
+            'redirect': linkpath,
+            'error_message': message
+        }
+        return render(request,
+                      "SmartSecure/register.html",
+                      context)
+
+
+def help(request):
+    return render(request, 'SmartSecure/help.html', {})
+
+def contact(request):
+    return render(request, 'SmartSecure/contact.html', {})
+
+def about(request):
+    return render(request, 'SmartSecure/about.html', {})
+
+
+def set_user(orig_func):
+    def temp_func(request, *args, **kwargs):
+        request.session['smart_user_name_error'] = ''
+        request.session.modified = True
+        user = request.COOKIES.get('smart_user_name', None)
+        if not user:
+            user = request.session.get('smart_user_name', None)
+        if user:
+            request.COOKIES.setdefault('smart_user_name', user)
+            return orig_func(request, *args, **kwargs)
+        else:
+            return login(request, request.path)
+    return temp_func
+
+
+def logout(request):
+    # request.delete_cookie('smart_user_name')
+    
+    request.session['smart_user_name'] = ''
+    request.session.modified = True
+    
+    response = login(request, "/dashboard")
+    response.delete_cookie('smart_user_name')
+    return response
+    
+
+# def login(request):
+#     # Construct a dictionary to pass to the template engine as its context.
+#     # Note the key boldmessage is the same as {{ boldmessage }} in the template!
+#     context_dict = {'boldmessage': "I am bold font from the context"}
+
+#     # Return a rendered response to send to the client.
+#     # We make use of the shortcut function to make our lives easier.
+#     # Note that the first parameter is the template we wish to use.
+
+#     return render(request, 'SmartSecure/login2.html', context_dict)
+
+
+# def about(request):
+# 	locations = connect_DB()
+# 	headers = locations[0].keys()
+# 	context = {
+# 	'locations': locations,
+# 	'headers': headers
+# 	}
+# 	return render(request, 'SmartSecure/about.html', context)
+	# return HttpResponse("Rango says here is the about page. <a href='/login/'>Index</a>")
+
+def get_dbuser(user_name):
+    """
+    Connect to mongodb and get user info
+    """
+    try:
+        client = pymongo.MongoClient(MONGODB_URI)
+        db = client.smartsecure
+        dbuser = db.users.find({"userId": user_name})
+    except Exception, m:
+        print "Error: %s" % m
+        return False
+
+    return dbuser
+
+def get_user(request):
+    user = request.COOKIES.get('smart_user_name', None)
+    if not user:
+        user = request.session.get('smart_user_name', None)
+    try:
+        dbuser = get_dbuser(user)
+    except Exception:
+        print "User %s not found in database." % user
+        return (user, False)
+
+    if not dbuser:
+        return (user, False)
+    return (user, dbuser)
+
+
+@set_user
+def dashboard(request):
+    """
+    Main landing page after login to show the stats
+    """
+    # print request.session.get('smart_user_name')
+    # print request.COOKIES.get('smart_user_name')
+    user_name, dbuser = get_user(request)
+
+    data_date = date.today()
+    if request.method == 'POST':
+        date_form = DatePicker(request.POST, label_suffix=': ')
+        if date_form.is_valid():
+            data_date = date_form.cleaned_data['date']
+    else:
+        date_form = DatePicker()
+        
+    print "User Name:", user_name
+    app_data = get_data(user_name, data_date)
+    print data_date
+    # print app_data
+    # print type(app_data)
+    # print dir(app_data)
+
+
+    if app_data:
+        # data structure template
+
+        # {
+        # Used number of apps
+        # total time spent on mobile
+        # Total data usage
+        # avg data usage
+        # Total incorrect Pswd Attempt Count
+        #     "_id": "56f1f937e4b0f5eed810a45c",
+        #     "androidId": "643f16492dd0195b",
+        #     "apps": [
+        #         {
+        #             "appAccessedDuration": 12558,
+        #             "appCrashCount": 0,
+        #             "appname": "com.facebook.katana",
+        #             "lastAccessedTimeStamp": 1458696671376,
+        #             "totalRxBytes": 63673424,
+        #             "totalTxBytes": 6907290, 
+        #             "totalBytes": "totalRxBytes" + "totalTxBytes"
+        #         },
+        #     ],
+        #     "incorrectPswdAttemptCount": 0,
+        #     "locs": [
+        #         {
+        #             "lastKnownLat": 37.55,
+        #             "lastKnownLong": -122.313,
+        #             "lastSeenTime": 1458698251355,
+        #             "startTime": 1458696079196
+        #         }
+        #     ],
+        #     "statsStartTime": 1458694800000,
+        #     "upTime": 137464034,
+        #     "userId": "obulicrusader@gmail.com",
+        #     "wifis": [
+        #         "Drawbridge Guest",
+        #         "0x"
+        #     ]
+        # }
+
+        data = {}
+        for key, value in app_data.items():
+            # print key
+            # value = app_data[key]
+            # print value
+            if key == '_id':
+                continue
+                # data[key] = value.get('$oid', '')
+
+            elif key == 'apps':  # modify some fields for app
+                data['apps'] = {}
+                for app in value:
+                    appname = app.get('appname')
+                    data['apps'][appname] = {}
+                    appAccessedDuration = app.get('appAccessedDuration', 0)
+                    appCrashCount = app.get('appCrashCount', 0)
+                    lastAccessedTimeStamp = app.get('lastAccessedTimeStamp')
+                    totalRxBytes = app.get('totalRxBytes', 0)
+                    totalTxBytes = app.get('totalTxBytes', 0)
+                    totalBytes = int(totalTxBytes) + int(totalRxBytes)
+
+                    data['apps'][appname] = {
+                        'appAccessedDuration': appAccessedDuration,
+                        'appCrashCount': appCrashCount,
+                        'lastAccessedTimeStamp': lastAccessedTimeStamp,
+                        'totalRxBytes': totalRxBytes,
+                        'totalTxBytes': totalTxBytes,
+                        'totalBytes': totalBytes
+                    }
+
+            else:
+                data[key] = value
+
+        # print data
+        
+        # Used number of apps
+        # total time spent on mobile
+        # Total data usage
+        # avg data usage
+        # Total incorrect Pswd Attempt Count
+
+        total_apps = len(data['apps'].keys())
+        total_time_spent_on_apps = readable_time(sum([int(data['apps'][app]['appAccessedDuration']) for app in data['apps'].keys()]))
+        total_data_usage = readable_size(sum([data['apps'][app]['totalBytes'] for app in data['apps'].keys()]))
+        avg_data_usage = "%.2f" % (float(total_data_usage) / float(total_apps))
+        total_wifi_networks_used = len(data.get('wifis', []))
+
+        data['total_apps'] = total_apps
+        data['total_time_spent_on_apps'] = total_time_spent_on_apps
+        data['total_data_usage'] = total_data_usage
+        data['avg_data_usage'] = avg_data_usage
+        data['total_wifi_networks_used'] = total_wifi_networks_used
+
+        apps = []
+        access_chart = []
+        network_usage_chart = {}
+        received = []
+        transmitted = []
+        total = []
+
+        for appname, app in data['apps'].items():
+            apps.append(appname)
+            # appname = app.get('appname')
+            access_duration = app.get('appAccessedDuration', 0)
+            received_bytes = app.get('totalRxBytes', 0)
+            transmitted_bytes = app.get('totalTxBytes', 0)
+            total_bytes = app.get('totalBytes', 0)
+
+            access_chart.append(float("%.2f" % (access_duration / (60*1000.0))))  # in mins
+
+            received.append(readable_size(received_bytes))
+            transmitted.append(readable_size(transmitted_bytes))
+            total.append(readable_size(total_bytes))
+
+        locations = []
+        locs = app_data['locs']
+        print locs
+        counter = 1
+        for ldict in locs:
+            locations.append("Point%s;%s;%s;%s" % (counter, ldict['lastKnownLat'], ldict['lastKnownLong'], convert_datetime(ldict['lastSeenTime'])))
+            counter += 1
+
+        print locations
+
+        #             "lastKnownLat": 37.55,
+        #             "lastKnownLong": -122.313,
+        #             "lastSeenTime": 1458698251355,
+        #             "startTime": 1458696079196
+                
+
+        context = {
+            'user': user_name,
+            'data': data,
+            'access_chart': access_chart,
+            'network_usage_chart': network_usage_chart,
+            'apps': ",".join(apps),
+            'received': received,
+            'transmitted': transmitted,
+            'total': total,
+            'date_form': date_form,
+            'locs': locations,
+        }
+    else:
+        context = {
+            'user': user_name,
+            'data': {},
+            'access_chart': {},
+            'network_usage_chart': {},
+            'apps': '',
+            'received': [],
+            'transmitted': [],
+            'total': [],
+            'date_form': date_form,
+            'locs': [],
+        }
+
+    return render(request, 'SmartSecure/dashboard.html', context)
+
+
+def get_data(user_name, data_date):
+    """
+    Connect and get data from mongo db
+    """
+    try:
+        client = pymongo.MongoClient(MONGODB_URI)
+        db = client.smartsecure
+        # locations = db.smartsecure.find_one({"userId": user_name})
+        locations = db.smartsecure.find_one({"userId": user_name, "statsStartTime": 1460052000000})
+        return locations
+    except Exception, m:
+        print "Error: %s" % m
+    return False
+    
